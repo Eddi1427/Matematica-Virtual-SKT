@@ -12,7 +12,7 @@
   function clearLegacyStorage(){
     const legacyKeys=["SUPABASE_URL","SUPABASE_PUBLISHABLE_KEY","SUPABASE_ANON_KEY","supabase_url","supabase_key","supabase_anon_key","supabaseConfig","skt_supabase_old_config","sb_config"]; 
     for(const key of legacyKeys){
-      try{ localStorage.removeItem(key); }catch(_{})
+      try{ localStorage.removeItem(key); }catch { }
     }
   }
 
@@ -24,7 +24,7 @@
       localStorage.setItem(CFG, JSON.stringify(DEFAULT_CONFIG));
     }
   }catch(e){
-    try{ localStorage.setItem(CFG, JSON.stringify(DEFAULT_CONFIG)); }catch(_{})
+    try{ localStorage.setItem(CFG, JSON.stringify(DEFAULT_CONFIG)); }catch { }
   }
 
   window.DEFAULT_CONFIG = DEFAULT_CONFIG;
@@ -476,6 +476,135 @@ app.innerHTML=`<div class="head"><div><h1>Nueva sesión de asistencia</h1><div c
 document.getElementById("af").onsubmit=e=>{e.preventDefault();let f=new FormData(e.target);students.forEach(s=>acad.attendance.push({student:s.id,course:f.get("course"),date:f.get("date"),state:f.get("st_"+s.id)}));saveAcad();alert("Asistencia guardada.");attendanceModule()}
 }
 document.querySelectorAll("#nav button").forEach(b=>b.onclick=()=>page(b.dataset.page));document.getElementById("search").oninput=function(){if(this.value.trim()){page("estudiantes");document.getElementById("sq").value=this.value;render()}};dashboard();
+</script>
+
+<script id="skt-virtual-classes-supabase">
+(function(){
+  'use strict';
+  const db=()=>window.sktSupabase||window.client||null;
+  const app=()=>document.getElementById('app');
+  const role=()=>String(window.currentUser?.role||'').trim();
+  const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  const classesTable=()=>{const client=db();return client?client.schema('public').from('virtual_classes'):null;};
+  const classFields='id,title,course_id,class_date,class_time,topic,description,meet_url,created_by,created_at,updated_at';
+  let courses=[];
+
+  function fail(error,message){
+    console.error('SKT virtual classes:',error);
+    alert(message+(error?.message?`\n\n${error.message}`:''));
+  }
+
+  async function loadCourses(){
+    const client=db();
+    if(!client) throw new Error('Supabase no está conectado.');
+    let query=client.from('courses').select('id,code,name,grade,section,teacher_id,active').eq('active',true).order('code',{ascending:true});
+    if(role()==='Docente'){
+      const teacher=await client.from('teachers').select('id').eq('user_id',window.currentUser?.id).eq('active',true).maybeSingle();
+      if(teacher.error) throw teacher.error;
+      if(!teacher.data){courses=[];return courses;}
+      query=query.eq('teacher_id',teacher.data.id);
+    }
+    const result=await query;
+    if(result.error) throw result.error;
+    courses=result.data||[];
+    return courses;
+  }
+
+  function courseLabel(id){
+    const c=courses.find(x=>String(x.id)===String(id));
+    return c?`${c.name||''} · ${c.grade||''} ${c.section||''} · ${c.code||''}`.replace(/ · $/,''):String(id||'Curso');
+  }
+
+  async function loadStudentCourseIds(){
+    const client=db(),uid=window.currentUser?.id;
+    if(!client||!uid) throw new Error('No se encontró la sesión del estudiante.');
+    const student=await client.from('students').select('id').eq('user_id',uid).eq('active',true).maybeSingle();
+    if(student.error) throw student.error;
+    if(!student.data)return [];
+    const enrollments=await client.from('enrollments').select('course_id').eq('student_id',student.data.id);
+    if(enrollments.error) throw enrollments.error;
+    return (enrollments.data||[]).map(x=>x.course_id);
+  }
+
+  async function loadClasses(){
+    const table=classesTable();
+    if(!table) throw new Error('Supabase no está conectado.');
+    const result=await table.select(classFields).order('class_date',{ascending:true}).order('class_time',{ascending:true});
+    if(result.error) throw result.error;
+    return result.data||[];
+  }
+
+  function formatTime(value){return String(value||'').slice(0,5);}
+  function validMeetUrl(value){
+    try{return new URL(value).protocol==='https:'&&new URL(value).hostname==='meet.google.com';}catch{return false;}
+  }
+
+  function classCard(item,canManage){
+    const manage=canManage&&String(item.created_by||'')===String(window.currentUser?.id||'')||role()==='Administrador';
+    return `<div class="skt-class"><b>${esc(item.title)}</b><span>${esc(courseLabel(item.course_id))}</span><small>${esc(item.class_date)} · ${esc(formatTime(item.class_time))}</small><small>${esc(item.topic)}</small>${item.description?`<small>${esc(item.description)}</small>`:''}${role()==='Estudiante'?`<button class="primary" type="button" onclick='sktEnterGoogleMeet(${JSON.stringify(item.meet_url)})'>🎥 ENTRAR A GOOGLE MEET</button>`:''}${manage?`<button class="skt-mini" type="button" onclick="sktVirtualClassForm('${esc(item.id)}')">Editar</button> <button class="skt-mini" type="button" onclick="sktVirtualClassDelete('${esc(item.id)}')">Eliminar</button>`:''}</div>`;
+  }
+
+  async function render(){
+    const target=app();if(!target)return;
+    try{
+      const currentRole=role();
+      if(!db())throw new Error('Supabase no está conectado.');
+      await loadCourses();
+      let allowedCourseIds=null;
+      if(currentRole==='Estudiante')allowedCourseIds=await loadStudentCourseIds();
+      let data=await loadClasses();
+      if(allowedCourseIds)data=data.filter(x=>allowedCourseIds.some(id=>String(id)===String(x.course_id)));
+      const canManage=currentRole==='Administrador'||currentRole==='Docente';
+      target.innerHTML=`<div class="head"><div><h1>Clases Virtuales</h1><div class="muted">${data.length} clases disponibles</div></div>${canManage?'<button class="primary" type="button" onclick="sktVirtualClassForm()">+ Nueva clase virtual</button>':''}</div><div class="panel"><div class="skt-schedule">${data.length?data.map(x=>classCard(x,canManage)).join(''):'<div class="skt-empty">No hay clases virtuales disponibles.</div>'}</div></div>`;
+    }catch(error){fail(error,'No se pudieron cargar las clases virtuales.');}
+  }
+
+  window.sktEnterGoogleMeet=function(url){if(validMeetUrl(url))window.open(url,'_blank','noopener,noreferrer');else alert('El enlace de Google Meet no es válido.');};
+
+  window.sktVirtualClassForm=async function(id){
+    if(role()!=='Administrador'&&role()!=='Docente'){alert('No tienes permisos para gestionar clases virtuales.');return;}
+    try{
+      await loadCourses();
+      const current=id?(await classesTable().select(classFields).eq('id',id).maybeSingle()).data:{title:'',course_id:'',class_date:new Date().toISOString().slice(0,10),class_time:'08:00',topic:'',description:'',meet_url:''};
+      if(id&&!current)throw new Error('La clase virtual no existe o no está disponible.');
+      app().innerHTML=`<div class="head"><div><h1>${id?'Editar':'Nueva'} clase virtual</h1><div class="muted">Datos de la sesión y enlace de Google Meet</div></div><button class="secondary" type="button" onclick="sktRenderClases()">← Volver</button></div><div class="panel"><form id="sktVirtualClassForm" class="form"><label>Título<input name="title" required maxlength="160" value="${esc(current.title)}"></label><label>Curso<select name="course_id" required><option value="">Seleccione</option>${courses.map(c=>`<option value="${esc(c.id)}" ${String(c.id)===String(current.course_id)?'selected':''}>${esc(courseLabel(c.id))}</option>`).join('')}</select></label><label>Fecha<input name="class_date" type="date" required value="${esc(current.class_date)}"></label><label>Hora<input name="class_time" type="time" required value="${esc(formatTime(current.class_time))}"></label><label>Tema<input name="topic" required maxlength="200" value="${esc(current.topic)}"></label><label>Enlace de Google Meet<input name="meet_url" type="url" required placeholder="https://meet.google.com/..." value="${esc(current.meet_url)}"></label><label class="full">Descripción<textarea name="description" rows="4">${esc(current.description)}</textarea></label><div class="full"><button class="primary" type="submit">Guardar clase virtual</button> <button class="secondary" type="button" onclick="sktRenderClases()">Cancelar</button></div></form></div>`;
+      document.getElementById('sktVirtualClassForm').onsubmit=async event=>{
+        event.preventDefault();
+        const form=event.currentTarget,button=form.querySelector('button[type="submit"]'),values=new FormData(form),payload={title:String(values.get('title')).trim(),course_id:String(values.get('course_id')),class_date:String(values.get('class_date')),class_time:String(values.get('class_time')),topic:String(values.get('topic')).trim(),description:String(values.get('description')||'').trim(),meet_url:String(values.get('meet_url')).trim()};
+        if(!validMeetUrl(payload.meet_url)){alert('Ingresa un enlace válido de Google Meet.');return;}
+        button.disabled=true;button.textContent='Guardando...';
+        const result=id?await classesTable().update(payload).eq('id',id).select(classFields).single():await classesTable().insert({...payload,created_by:window.currentUser?.id}).select(classFields).single();
+        if(result.error){button.disabled=false;button.textContent='Guardar clase virtual';fail(result.error,'No se pudo guardar la clase virtual.');return;}
+        await render();
+      };
+    }catch(error){fail(error,'No se pudo abrir la clase virtual.');}
+  };
+
+  window.sktVirtualClassDelete=async function(id){
+    if(role()!=='Administrador'&&role()!=='Docente')return;
+    if(!confirm('¿Eliminar esta clase virtual?'))return;
+    const result=await classesTable().delete().eq('id',id);
+    if(result.error){fail(result.error,'No se pudo eliminar la clase virtual.');return;}
+    await render();
+  };
+
+  window.sktVirtualClassesRender=render;
+  window.sktRenderClases=render;
+  const previousPage=window.page;
+  window.page=function(page){if(page==='clases')return render();return previousPage&&previousPage(page);};
+
+  function addStudentMenuItem(){
+    if(role()!=='Estudiante')return;
+    const menu=document.querySelector('#nav .skt48-menu');
+    if(!menu||menu.querySelector('[data-skt-virtual-classes]'))return;
+    const button=document.createElement('button');button.type='button';button.textContent='🎥  Clases Virtuales';button.setAttribute('data-skt-virtual-classes','1');button.setAttribute('data-role-page','clases');button.onclick=()=>{menu.querySelectorAll('button').forEach(x=>x.classList.remove('active'));button.classList.add('active');render();};menu.appendChild(button);
+  }
+  const nav=document.getElementById('nav');
+  if(nav)new MutationObserver(addStudentMenuItem).observe(nav,{childList:true,subtree:true});
+  window.addEventListener('skt:role-ready',()=>setTimeout(addStudentMenuItem,50));
+  window.addEventListener('skt:student-ready',()=>setTimeout(addStudentMenuItem,50));
+  setTimeout(addStudentMenuItem,1000);
+})();
 </script>
 <script>
 /* ===== v1.0 SUPABASE AUTH =====
@@ -1136,7 +1265,8 @@ function showRuntimeNotice(msg){
       specialty:x.specialty||"",
       email:x.email||"",
       phone:x.phone||"",
-      active:x.active!==false
+      active:x.active!==false,
+      user_id:x.user_id ?? null
     };
   }
 
@@ -1144,7 +1274,7 @@ function showRuntimeNotice(msg){
     if(!db()) return false;
     const {data,error}=await db()
       .from("teachers")
-      .select("id,code,full_name,specialty,email,phone,active")
+      .select("id,code,full_name,specialty,email,phone,active,user_id")
       .order("code");
     if(error){
       console.error("SKT teachers:",error);
@@ -1220,6 +1350,7 @@ function showRuntimeNotice(msg){
                 <th>Especialidad</th>
                 <th>Correo</th>
                 <th>Teléfono</th>
+                <th>Cuenta</th>
                 <th>Estado</th>
                 <th>Acciones</th>
               </tr>
@@ -1251,13 +1382,14 @@ function showRuntimeNotice(msg){
         <td>${escT(t.specialty||"—")}</td>
         <td>${escT(t.email||"—")}</td>
         <td>${escT(t.phone||"—")}</td>
+        <td>${t.user_id != null ? "Vinculada" : "Sin vincular"}</td>
         <td><span class="badge ${t.active?"":"warn"}">${t.active?"Activo":"Inactivo"}</span></td>
         <td class="actions">
           <button onclick="teacherFormDB('${t.id}')">Editar</button>
           <button onclick="toggleTeacherStatusDB('${t.id}')">${t.active?"Desactivar":"Activar"}</button>
         </td>
       </tr>`).join("") ||
-      `<tr><td colspan="7" class="empty">No hay docentes que coincidan con la búsqueda.</td></tr>`;
+      `<tr><td colspan="8" class="empty">No hay docentes que coincidan con la búsqueda.</td></tr>`;
   };
 
   window.teacherFormDB=function(id){
@@ -4819,6 +4951,40 @@ let n=0;const timer=setInterval(()=>{addQAButton();if(++n>80)clearInterval(timer
 })();
 </script>
 </body></html><script>
+/* ===== ACTIVADOR FINAL: CLASES VIRTUALES SUPABASE ===== */
+(function(){
+  'use strict';
+  const previousPage=window.page;
+  if(typeof window.sktVirtualClassesRender==='function')window.sktRenderClases=window.sktVirtualClassesRender;
+  window.page=function(page){
+    if(page==='clases'&&typeof window.sktRenderClases==='function')return window.sktRenderClases();
+    return previousPage&&previousPage(page);
+  };
+  if(typeof window.sktVirtualClassForm==='function')window.sktClaseForm=window.sktVirtualClassForm;
+  if(typeof window.sktVirtualClassDelete==='function')window.sktClaseDelete=window.sktVirtualClassDelete;
+  function addStudentVirtualClasses(){
+    if(String(window.currentUser?.role||'').trim()!=='Estudiante')return;
+    const menu=document.querySelector('#nav .skt48-menu');
+    if(!menu||menu.querySelector('[data-skt-virtual-classes]'))return;
+    const button=document.createElement('button');
+    button.type='button';
+    button.textContent='🎥  Clases Virtuales';
+    button.setAttribute('data-skt-virtual-classes','1');
+    button.setAttribute('data-role-page','clases');
+    button.onclick=function(){
+      menu.querySelectorAll('button').forEach(x=>x.classList.remove('active'));
+      button.classList.add('active');
+      window.sktRenderClases();
+    };
+    menu.appendChild(button);
+  }
+  const nav=document.getElementById('nav');
+  if(nav)new MutationObserver(addStudentVirtualClasses).observe(nav,{childList:true,subtree:true});
+  window.addEventListener('skt:role-ready',()=>setTimeout(addStudentVirtualClasses,50));
+  window.addEventListener('skt:student-ready',()=>setTimeout(addStudentVirtualClasses,50));
+  window.addEventListener('load',()=>setTimeout(addStudentVirtualClasses,100));
+})();
+</script></body></html><script>
 /* ===== v5.3 ADMIN: consolidación segura de gestión académica ===== */
 (function(){
   'use strict';
