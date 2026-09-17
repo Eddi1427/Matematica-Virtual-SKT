@@ -4560,7 +4560,7 @@ setInterval(function(){if(role()){var b=nav&&nav.querySelector('.skt48-menu');if
     if(duplicate){ return {ok:false, message:'Ya existe un recurso con ese título.'}; }
 
     try{
-      if(obj.id && String(obj.id).length>0 && !String(obj.id).startsWith('r')){
+      if(obj.id && String(obj.id).length>0){
         const { error } = await client.from(TABLE).update(payload).eq('id', obj.id);
         if(error) throw error;
         return {ok:true};
@@ -4637,7 +4637,7 @@ setInterval(function(){if(role()){var b=nav&&nav.querySelector('.skt48-menu');if
     if(cancelBtn) cancelBtn.addEventListener('click', () => renderBiblioteca(), { once: true });
     if(saveBtn) saveBtn.addEventListener('click', async () => {
       const obj={
-        id:x.id || `r${Date.now()}`,
+        id:item ? x.id : null,
         titulo:document.getElementById('lfTitle').value.trim(),
         tipo:document.getElementById('lfType').value,
         categoria:document.getElementById('lfCat').value.trim()||'Otros',
@@ -4648,7 +4648,7 @@ setInterval(function(){if(role()){var b=nav&&nav.querySelector('.skt48-menu');if
       if(!obj.titulo){ alert('Ingresa el título del recurso.'); return; }
       const result=await persistResource(obj);
       if(!result.ok){ alert(result.message || 'No se pudo guardar.'); return; }
-      renderBiblioteca();
+      await renderBiblioteca();
     }, { once: true });
   }
 
