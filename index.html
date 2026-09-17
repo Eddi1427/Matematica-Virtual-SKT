@@ -2015,6 +2015,8 @@ function showRuntimeNotice(msg){
     filterEvaluationsDB();
   }
 
+  window.renderEval=renderEval;
+
   window.filterEvaluationsDB=function(){
     const q=(document.getElementById("evSearchDB")?.value||"").toLowerCase();
     const rows=evaluations.filter(e=>{
