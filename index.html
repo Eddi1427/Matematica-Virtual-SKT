@@ -5432,6 +5432,127 @@ let n=0;const timer=setInterval(()=>{addQAButton();if(++n>80)clearInterval(timer
 })();
 </script>
 
+
+<script id="skt-enrollment-requests-v1">
+(function(){
+  "use strict";
+  const db=()=>window.sktSupabase||window.client||null;
+  const esc=v=>String(v??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]));
+  const role=()=>String(window.currentUser?.role||"").trim();
+
+  async function getMyStudent(){
+    const c=db(), uid=window.currentUser?.id;
+    if(!c||!uid) throw new Error("No hay sesión activa.");
+    const r=await c.from("students").select("id,code,full_name,grade,section,email,phone,active").eq("user_id",uid).maybeSingle();
+    if(r.error) throw r.error;
+    return r.data;
+  }
+
+  async function studentEnrollmentRequests(){
+    if(role()!=="Estudiante") return;
+    const c=db(); if(!c) return;
+    try{
+      const st=await getMyStudent();
+      if(!st){
+        document.getElementById("app").innerHTML=`<div class="panel"><h3>Solicitud de matrícula</h3><p>No se encontró un registro de estudiante vinculado a esta cuenta.</p></div>`;
+        return;
+      }
+      const [cr,rr]=await Promise.all([
+        c.from("courses").select("id,code,name,grade,section,active").eq("active",true).order("code"),
+        c.from("enrollment_requests").select("id,course_id,status,notes,requested_at,reviewed_at").eq("student_id",st.id).order("requested_at",{ascending:false})
+      ]);
+      if(cr.error) throw cr.error; if(rr.error) throw rr.error;
+      const courses=cr.data||[], requests=rr.data||[];
+      const requested=new Set(requests.filter(x=>x.status==="pending").map(x=>String(x.course_id)));
+      const byCourse=new Map(courses.map(x=>[String(x.id),x]));
+      document.getElementById("app").innerHTML=`
+        <div class="head"><div><h1>Solicitud de matrícula</h1><div class="muted">Solicita un curso y espera la aprobación del administrador.</div></div></div>
+        <div class="panel"><h3>Datos del estudiante</h3><div class="row"><span>Estudiante</span><b>${esc(st.full_name)}</b></div><div class="row"><span>Grado / sección</span><b>${esc(st.grade)} · ${esc(st.section)}</b></div></div>
+        <div class="panel"><h3>Solicitar un curso</h3><form id="sktEnrollReqForm"><div class="form"><label>Curso<select name="course_id" required><option value="">Seleccione un curso</option>${courses.map(c=>`<option value="${esc(c.id)}">${esc(c.name||c.code)} · ${esc(c.grade||"")} ${esc(c.section||"")}${requested.has(String(c.id))?" · SOLICITADO":""}</option>`).join("")}</select></label><label>Comentario (opcional)<input name="notes" maxlength="500" placeholder="Ej.: Solicito matrícula para este curso."></label></div><br><button class="primary" id="sktReqBtn">Enviar solicitud</button></form><div id="sktReqMsg" style="margin-top:10px"></div></div>
+        <div class="panel"><h3>Mis solicitudes</h3><div style="overflow:auto"><table class="table"><thead><tr><th>Curso</th><th>Fecha</th><th>Estado</th><th>Observación</th></tr></thead><tbody>${requests.map(r=>{const c=byCourse.get(String(r.course_id));const label=c?`${c.name||c.code} · ${c.grade||""} ${c.section||""}`:String(r.course_id);const badge=r.status==="approved"?"badge":r.status==="rejected"?"badge warn":"badge";const text=r.status==="approved"?"Aprobada":r.status==="rejected"?"Rechazada":"Pendiente";return `<tr><td>${esc(label)}</td><td>${esc(new Date(r.requested_at).toLocaleString("es-PE"))}</td><td><span class="${badge}">${text}</span></td><td>${esc(r.notes||"—")}</td></tr>`}).join("")||`<tr><td colspan="4" class="empty">Todavía no tienes solicitudes.</td></tr>`}</tbody></table></div></div>`;
+      const form=document.getElementById("sktEnrollReqForm");
+      form.onsubmit=async e=>{
+        e.preventDefault();
+        const btn=document.getElementById("sktReqBtn"), msg=document.getElementById("sktReqMsg");
+        const f=new FormData(form); const courseId=String(f.get("course_id")||"");
+        if(!courseId)return;
+        btn.disabled=true; btn.textContent="Enviando…"; msg.textContent="";
+        try{
+          const r=await c.from("enrollment_requests").insert({student_id:st.id,user_id:window.currentUser.id,course_id:courseId,notes:String(f.get("notes")||"").trim()}).select().single();
+          if(r.error) throw r.error;
+          await studentEnrollmentRequests();
+        }catch(err){
+          msg.innerHTML=`<div style="background:#fff1f2;color:#be123c;padding:10px;border-radius:8px">No se pudo enviar la solicitud. ${esc(err.message||err)}</div>`;
+          btn.disabled=false; btn.textContent="Enviar solicitud";
+        }
+      };
+    }catch(err){
+      document.getElementById("app").innerHTML=`<div class="panel"><h3>Solicitud de matrícula</h3><div style="background:#fff1f2;color:#be123c;padding:10px;border-radius:8px">No se pudo cargar el módulo. ${esc(err.message||err)}</div></div>`;
+    }
+  }
+
+  async function adminEnrollmentRequests(){
+    if(role()!=="Administrador") return;
+    const c=db(); if(!c) return;
+    const app=document.getElementById("app"); if(!app)return;
+    app.innerHTML=`<div class="head"><div><h1>Solicitudes de matrícula</h1><div class="muted">Revisa y aprueba las solicitudes de los estudiantes.</div></div><button class="secondary" onclick="adminEnrollmentRequests()">↻ Actualizar</button></div><div class="panel" id="sktReqAdminBody">Cargando solicitudes…</div>`;
+    try{
+      const [rq,st,co]=await Promise.all([
+        c.from("enrollment_requests").select("id,student_id,course_id,status,notes,requested_at,reviewed_at,reviewed_by").order("requested_at",{ascending:false}),
+        c.from("students").select("id,code,full_name,grade,section"),
+        c.from("courses").select("id,code,name,grade,section")
+      ]);
+      if(rq.error)throw rq.error;if(st.error)throw st.error;if(co.error)throw co.error;
+      const sm=new Map((st.data||[]).map(x=>[String(x.id),x]));
+      const cm=new Map((co.data||[]).map(x=>[String(x.id),x]));
+      const rows=(rq.data||[]).map(r=>{const s=sm.get(String(r.student_id)),c=cm.get(String(r.course_id));const pending=r.status==="pending";return `<tr><td><b>${esc(s?.full_name||"Estudiante")}</b><div class="muted">${esc(s?.code||"")} · ${esc(s?.grade||"")} ${esc(s?.section||"")}</div></td><td>${esc(c?.name||c?.code||"Curso")}<div class="muted">${esc(c?.grade||"")} ${esc(c?.section||"")}</div></td><td>${esc(new Date(r.requested_at).toLocaleString("es-PE"))}</td><td>${pending?'<span class="badge">Pendiente</span>':r.status==='approved'?'<span class="badge">Aprobada</span>':'<span class="badge warn">Rechazada</span>'}</td><td>${esc(r.notes||"—")}</td><td>${pending?`<div class="actions"><button class="primary" onclick="sktApproveEnrollment('${esc(r.id)}')">Aprobar</button><button onclick="sktRejectEnrollment('${esc(r.id)}')">Rechazar</button></div>`:'—'}</td></tr>`}).join("");
+      document.getElementById("sktReqAdminBody").innerHTML=`<div style="overflow:auto"><table class="table"><thead><tr><th>Estudiante</th><th>Curso</th><th>Solicitada</th><th>Estado</th><th>Nota</th><th>Acción</th></tr></thead><tbody>${rows||'<tr><td colspan="6" class="empty">No hay solicitudes.</td></tr>'}</tbody></table></div>`;
+    }catch(err){document.getElementById("sktReqAdminBody").innerHTML=`<div style="background:#fff1f2;color:#be123c;padding:10px;border-radius:8px">No se pudieron cargar las solicitudes. ${esc(err.message||err)}</div>`;}
+  }
+
+  window.sktStudentEnrollmentRequests=studentEnrollmentRequests;
+  window.sktAdminEnrollmentRequests=adminEnrollmentRequests;
+  window.sktApproveEnrollment=async function(id){
+    const c=db(); if(!c)return;
+    if(!confirm("¿Aprobar esta solicitud y matricular al estudiante en el curso?"))return;
+    try{
+      const r=await c.rpc("approve_enrollment_request",{p_request_id:id});
+      if(r.error)throw r.error;
+      alert("Solicitud aprobada y matrícula registrada.");
+      adminEnrollmentRequests();
+    }catch(err){alert("No se pudo aprobar la solicitud.\n\n"+(err.message||err));}
+  };
+  window.sktRejectEnrollment=async function(id){
+    const c=db(); if(!c)return;
+    const notes=prompt("Motivo del rechazo (opcional):","");
+    if(notes===null)return;
+    try{
+      const r=await c.from("enrollment_requests").update({status:"rejected",notes:String(notes||"").trim(),reviewed_at:new Date().toISOString(),reviewed_by:window.currentUser.id}).eq("id",id).eq("status","pending");
+      if(r.error)throw r.error;
+      alert("Solicitud rechazada.");
+      adminEnrollmentRequests();
+    }catch(err){alert("No se pudo rechazar la solicitud.\n\n"+(err.message||err));}
+  };
+
+  function addMenuItem(){
+    const nav=document.getElementById("nav"); if(!nav)return;
+    const r=role();
+    if(r==="Administrador"){
+      let b=nav.querySelector('[data-page="enrollment-requests"]');
+      if(!b){const small=document.createElement("small");small.textContent="MATRÍCULA";nav.appendChild(small);b=document.createElement("button");b.type="button";b.dataset.page="enrollment-requests";b.textContent="▤  Solicitudes de matrícula";b.onclick=adminEnrollmentRequests;nav.appendChild(b);}
+      b.style.display="";
+    }else if(r==="Estudiante"){
+      let box=nav.querySelector(".skt-enrollment-student-menu");
+      if(!box){box=document.createElement("div");box.className="skt-enrollment-student-menu";box.innerHTML='<small>MATRÍCULA</small><button type="button">▤  Solicitud de matrícula</button>';nav.appendChild(box);box.querySelector("button").onclick=studentEnrollmentRequests;}
+      box.style.display="block";
+    }
+  }
+  window.addEventListener("skt:role-ready",()=>setTimeout(addMenuItem,120));
+  window.addEventListener("skt:student-ready",()=>setTimeout(addMenuItem,120));
+  window.addEventListener("load",()=>setTimeout(addMenuItem,900));
+  window.sktOpenEnrollmentRequests=function(){return role()==="Administrador"?adminEnrollmentRequests():studentEnrollmentRequests();};
+})();
+</script>
 </body></html><script>
 /* ===== ACTIVADOR FINAL: CLASES VIRTUALES SUPABASE ===== */
 (function(){
